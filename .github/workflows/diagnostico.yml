@@ -1,0 +1,43 @@
+name: Diagnóstico temporal de conexión
+
+on:
+  push:
+    paths:
+      - ".github/workflows/diagnostico.yml"
+
+jobs:
+  diagnostico:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: IP y país del servidor de GitHub
+        run: curl -s --max-time 20 https://ipinfo.io/json || true
+
+      - name: API del Ministerio (curl normal)
+        run: |
+          curl -sv --max-time 60 -o /tmp/r1 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
+            -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" \
+            -H "Accept: application/json" \
+            "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
+
+      - name: API del Ministerio (TLS 1.2 y cifrados antiguos)
+        run: |
+          curl -sv --max-time 60 --tlsv1.2 --tls-max 1.2 --ciphers 'DEFAULT@SECLEVEL=1' -o /tmp/r2 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
+            -H "Accept: application/json" \
+            "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
+
+      - name: openssl
+        run: echo | timeout 30 openssl s_client -connect sedeaplicaciones.minetur.gob.es:443 -servername sedeaplicaciones.minetur.gob.es 2>&1 | head -15 || true
+
+      - name: Dominio alternativo energia.serviciosmin.gob.es
+        run: |
+          curl -sv --max-time 60 -o /tmp/r3 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
+            -H "Accept: application/json" \
+            "https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
+          head -c 400 /tmp/r3 || true
+
+      - name: Geoportal (archivo Excel de precios)
+        run: |
+          curl -sv --max-time 90 -o /tmp/r4 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
+            "https://geoportalgasolineras.es/resources/files/preciosEESS_es.xls" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
+          file /tmp/r4 || true
