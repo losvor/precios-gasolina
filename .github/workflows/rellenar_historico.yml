@@ -1,10 +1,14 @@
 name: Rellenar histórico de precios
 
-# Descarga de golpe los precios de días pasados, mes a mes, guardando cada mes al terminarlo.
-# Si se corta (por ejemplo, por el límite de 6 horas de GitHub), basta con lanzarlo otra vez:
-# los días ya descargados se saltan.
+# Descarga los precios de días pasados, mes a mes, guardando cada mes al terminarlo.
+# El Ministerio tarda unos 30 s por día, así que rellenar varios años no cabe en una sola
+# ejecución (GitHub corta a las 6 horas). Por eso se lanza también cada 6 horas: cada tanda
+# continúa donde lo dejó la anterior, porque los días ya descargados se saltan.
+# Cuando el histórico esté completo, cada tanda solo comprueba y termina en un par de minutos.
 
 on:
+  schedule:
+    - cron: "7 */6 * * *"
   # La primera vez se lanza sola al subir este archivo, con las fechas por defecto.
   push:
     paths:
@@ -31,6 +35,8 @@ jobs:
   rellenar:
     runs-on: ubuntu-latest
     timeout-minutes: 350
+    env:
+      PYTHONUNBUFFERED: "1" # muestra los mensajes al momento, no al final
     steps:
       - uses: actions/checkout@v5
 

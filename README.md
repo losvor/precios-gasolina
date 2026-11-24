@@ -10,8 +10,10 @@ cuando baja** (el llamado efecto "cohetes y plumas").
 
 - **Cada mañana**, GitHub Actions ejecuta `recoger_precios.py`, que descarga los precios del día
   anterior y revisa la última semana por si algún día falló.
-- **El histórico** (desde enero de 2022) se rellena con el proceso `Rellenar histórico de precios`,
-  que se puede volver a lanzar desde la pestaña Actions para añadir años anteriores.
+- **El histórico** (desde enero de 2022) se rellena con el proceso `Rellenar histórico de precios`.
+  El Ministerio tarda unos 30 s por día, así que se hace en tandas automáticas cada 6 horas que
+  continúan donde lo dejó la anterior. Se puede lanzar a mano desde la pestaña Actions con otras
+  fechas para añadir años anteriores.
 - Todo sale del **servicio histórico de la API del Ministerio**, que da los precios de cualquier día.
   Usar siempre la misma fuente evita mezclar datos tomados de formas distintas.
 - Los archivos se guardan en la carpeta `datos/` del propio repositorio.

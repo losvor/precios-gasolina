@@ -198,6 +198,7 @@ def recoger_dia(fecha: date, forzar: bool = False) -> bool:
     if ruta_del_dia(fecha, CARPETA_DATOS).exists() and not forzar:
         print(f"{fecha}: ya descargado.")
         return True
+    inicio = time.time()
     try:
         datos = descargar(URL_HISTORICO.format(fecha=fecha.strftime("%d-%m-%Y")))
         recibidas = len(datos.get("ListaEESSPrecio", []))
@@ -207,7 +208,8 @@ def recoger_dia(fecha: date, forzar: bool = False) -> bool:
         print(f"{fecha}: ERROR, {error}")
         return False
     _, filas, total = procesar(datos, fecha, CARPETA_DATOS)
-    print(f"{fecha}: guardados los precios de {filas} gasolineras ({total} en el listado).")
+    segundos = time.time() - inicio
+    print(f"{fecha}: guardados los precios de {filas} gasolineras ({total} en el listado, {segundos:.0f} s).")
     return True
 
 
