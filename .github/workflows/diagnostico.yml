@@ -10,34 +10,49 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: IP y país del servidor de GitHub
-        run: curl -s --max-time 20 https://ipinfo.io/json || true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
 
-      - name: API del Ministerio (curl normal)
+      - name: curl con HTTP/1.1
         run: |
-          curl -sv --max-time 60 -o /tmp/r1 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
-            -A "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36" \
+          curl -s --http1.1 --max-time 60 -o /dev/null -w "curl http1.1: HTTP %{http_code}, %{size_download} bytes\n" \
             -H "Accept: application/json" \
-            "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
+            "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" || echo "curl http1.1 falló"
 
-      - name: API del Ministerio (TLS 1.2 y cifrados antiguos)
+      - name: Variantes de TLS en Python
         run: |
-          curl -sv --max-time 60 --tlsv1.2 --tls-max 1.2 --ciphers 'DEFAULT@SECLEVEL=1' -o /tmp/r2 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
-            -H "Accept: application/json" \
-            "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
+          pip -q install requests
+          python - <<'EOF'
+          import socket, ssl
+          HOST = "sedeaplicaciones.minetur.gob.es"
+          print("OpenSSL:", ssl.OPENSSL_VERSION)
 
-      - name: openssl
-        run: echo | timeout 30 openssl s_client -connect sedeaplicaciones.minetur.gob.es:443 -servername sedeaplicaciones.minetur.gob.es 2>&1 | head -15 || true
+          def prueba(nombre, ajustar):
+              ctx = ssl.create_default_context()
+              ajustar(ctx)
+              try:
+                  with socket.create_connection((HOST, 443), timeout=30) as s:
+                      with ctx.wrap_socket(s, server_hostname=HOST) as t:
+                          print(f"OK    {nombre}: {t.version()} {t.cipher()[0]} alpn={t.selected_alpn_protocol()}")
+              except Exception as e:
+                  print(f"FALLO {nombre}: {e!r}")
 
-      - name: Dominio alternativo energia.serviciosmin.gob.es
-        run: |
-          curl -sv --max-time 60 -o /tmp/r3 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
-            -H "Accept: application/json" \
-            "https://energia.serviciosmin.gob.es/ServiciosRestCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
-          head -c 400 /tmp/r3 || true
+          prueba("por defecto", lambda c: None)
+          prueba("alpn http/1.1 (como requests)", lambda c: c.set_alpn_protocols(["http/1.1"]))
+          prueba("alpn h2 + http/1.1 (como curl)", lambda c: c.set_alpn_protocols(["h2", "http/1.1"]))
+          prueba("solo TLS 1.2", lambda c: setattr(c, "maximum_version", ssl.TLSVersion.TLSv1_2))
+          prueba("cifrados DEFAULT", lambda c: c.set_ciphers("DEFAULT"))
+          prueba("cifrados DEFAULT@SECLEVEL=1", lambda c: c.set_ciphers("DEFAULT:@SECLEVEL=1"))
+          prueba("legacy server connect", lambda c: setattr(c, "options", c.options | 0x4))
 
-      - name: Geoportal (archivo Excel de precios)
-        run: |
-          curl -sv --max-time 90 -o /tmp/r4 -w "\nHTTP %{http_code}, %{size_download} bytes\n" \
-            "https://geoportalgasolineras.es/resources/files/preciosEESS_es.xls" 2>&1 | grep -E "Connected|SSL|TLS|HTTP|error|bytes" || true
-          file /tmp/r4 || true
+          import requests
+          url = f"https://{HOST}/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18"
+          for nombre, cab in [("requests sin cabeceras", {}),
+                              ("requests con Accept json", {"Accept": "application/json"})]:
+              try:
+                  r = requests.get(url, headers=cab, timeout=60)
+                  print(f"OK    {nombre}: HTTP {r.status_code}, {len(r.content)} bytes")
+              except Exception as e:
+                  print(f"FALLO {nombre}: {e!r}"[:300])
+          EOF
