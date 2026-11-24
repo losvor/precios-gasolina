@@ -8,51 +8,48 @@ on:
 jobs:
   diagnostico:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
-      - name: curl con HTTP/1.1
-        run: |
-          curl -s --http1.1 --max-time 60 -o /dev/null -w "curl http1.1: HTTP %{http_code}, %{size_download} bytes\n" \
-            -H "Accept: application/json" \
-            "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18" || echo "curl http1.1 falló"
-
-      - name: Variantes de TLS en Python
+      - name: Cabeceras y tamaño de la descarga
         run: |
           pip -q install requests
           python - <<'EOF'
-          import socket, ssl
-          HOST = "sedeaplicaciones.minetur.gob.es"
-          print("OpenSSL:", ssl.OPENSSL_VERSION)
-
-          def prueba(nombre, ajustar):
-              ctx = ssl.create_default_context()
-              ajustar(ctx)
+          import time, requests
+          BASE = "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/"
+          NAVEGADOR = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
+          PROPIO = "precios-gasolina/1.0 (+https://github.com/losvor/precios-gasolina)"
+          pruebas = [
+              ("Granada, UA navegador", BASE + "FiltroProvincia/18", NAVEGADOR),
+              ("Granada, UA propio", BASE + "FiltroProvincia/18", PROPIO),
+              ("España, UA propio", BASE, PROPIO),
+              ("España, UA navegador", BASE, NAVEGADOR),
+              ("España, UA por defecto", BASE, None),
+          ]
+          for nombre, url, ua in pruebas:
+              cab = {"Accept": "application/json"}
+              if ua:
+                  cab["User-Agent"] = ua
+              t = time.time()
               try:
-                  with socket.create_connection((HOST, 443), timeout=30) as s:
-                      with ctx.wrap_socket(s, server_hostname=HOST) as t:
-                          print(f"OK    {nombre}: {t.version()} {t.cipher()[0]} alpn={t.selected_alpn_protocol()}")
+                  r = requests.get(url, headers=cab, timeout=180)
+                  n = len(r.json().get("ListaEESSPrecio", [])) if r.ok else 0
+                  print(f"OK    {nombre}: HTTP {r.status_code}, {len(r.content)/1e6:.1f} MB, {n} gasolineras, {time.time()-t:.0f}s")
               except Exception as e:
-                  print(f"FALLO {nombre}: {e!r}")
-
-          prueba("por defecto", lambda c: None)
-          prueba("alpn http/1.1 (como requests)", lambda c: c.set_alpn_protocols(["http/1.1"]))
-          prueba("alpn h2 + http/1.1 (como curl)", lambda c: c.set_alpn_protocols(["h2", "http/1.1"]))
-          prueba("solo TLS 1.2", lambda c: setattr(c, "maximum_version", ssl.TLSVersion.TLSv1_2))
-          prueba("cifrados DEFAULT", lambda c: c.set_ciphers("DEFAULT"))
-          prueba("cifrados DEFAULT@SECLEVEL=1", lambda c: c.set_ciphers("DEFAULT:@SECLEVEL=1"))
-          prueba("legacy server connect", lambda c: setattr(c, "options", c.options | 0x4))
-
-          import requests
-          url = f"https://{HOST}/ServiciosRESTCarburantes/PreciosCarburantes/EstacionesTerrestres/FiltroProvincia/18"
-          for nombre, cab in [("requests sin cabeceras", {}),
-                              ("requests con Accept json", {"Accept": "application/json"})]:
-              try:
-                  r = requests.get(url, headers=cab, timeout=60)
-                  print(f"OK    {nombre}: HTTP {r.status_code}, {len(r.content)} bytes")
-              except Exception as e:
-                  print(f"FALLO {nombre}: {e!r}"[:300])
+                  print(f"FALLO {nombre}: {type(e).__name__}: {str(e)[:200]} ({time.time()-t:.0f}s)")
+              time.sleep(5)
           EOF
+
+      - name: Histórico con fecha (endpoint experimental)
+        run: |
+          B="https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes"
+          for U in "$B/EstacionesTerrestresHist/FiltroProvincia/01-01-2024/18" "$B/EstacionesTerrestresHist/01-01-2024"; do
+            echo "== $U"
+            curl -s --max-time 180 -o /tmp/h -w "Hist: HTTP %{http_code}, %{size_download} bytes\n" \
+              -H "Accept: application/json" "$U" || echo "Hist falló"
+            head -c 250 /tmp/h; echo
+          done
