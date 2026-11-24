@@ -1,0 +1,79 @@
+name: Rellenar histórico de precios
+
+# Descarga de golpe los precios de días pasados, mes a mes, guardando cada mes al terminarlo.
+# Si se corta (por ejemplo, por el límite de 6 horas de GitHub), basta con lanzarlo otra vez:
+# los días ya descargados se saltan.
+
+on:
+  # La primera vez se lanza sola al subir este archivo, con las fechas por defecto.
+  push:
+    paths:
+      - ".github/workflows/rellenar_historico.yml"
+  workflow_dispatch:
+    inputs:
+      desde:
+        description: "Primer día (AAAA-MM-DD)"
+        required: true
+        default: "2022-01-01"
+      hasta:
+        description: "Último día (AAAA-MM-DD). Vacío = ayer."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: recoger-precios
+  cancel-in-progress: false
+
+jobs:
+  rellenar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Descargar mes a mes y guardar
+        env:
+          DESDE: ${{ inputs.desde || '2022-01-01' }}
+          HASTA: ${{ inputs.hasta }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          AYER=$(TZ=Europe/Madrid date -d yesterday +%F)
+          FIN=${HASTA:-$AYER}
+          MES=$(date -d "$DESDE" +%Y-%m-01)
+          INICIO=$DESDE
+          HUBO_FALLOS=0
+
+          while [[ ! "$MES" > "$FIN" ]]; do
+            ULTIMO=$(date -d "$MES +1 month -1 day" +%F)
+            [[ "$ULTIMO" > "$FIN" ]] && ULTIMO=$FIN
+            [[ "$INICIO" < "$MES" ]] && INICIO=$MES
+
+            echo "::group::$INICIO a $ULTIMO"
+            python recoger_precios.py --desde "$INICIO" --hasta "$ULTIMO" || HUBO_FALLOS=1
+            echo "::endgroup::"
+
+            git add datos 2>/dev/null || true
+            if ! git diff --cached --quiet; then
+              git commit -q -m "Histórico de precios: $INICIO a $ULTIMO"
+              git pull --rebase -q
+              git push -q
+            fi
+            MES=$(date -d "$MES +1 month" +%F)
+          done
+
+          if [ "$HUBO_FALLOS" = 1 ]; then
+            echo "Algunos días fallaron. Lanza este proceso otra vez para reintentarlos."
+            exit 1
+          fi

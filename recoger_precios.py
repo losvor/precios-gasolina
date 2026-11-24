@@ -2,47 +2,48 @@
 Descarga los precios de todas las gasolineras de España desde la API pública
 del Ministerio para la Transición Ecológica y los guarda en la carpeta datos/.
 
-Cada ejecución genera o actualiza:
+Usa el servicio histórico de la API, que da los precios de cualquier día pasado.
+Así toda la serie (la de años anteriores y la de cada día nuevo) sale de la misma fuente.
+
+Cada día procesado genera o actualiza:
   - datos/precios/AAAA/AAAA-MM-DD.csv.gz -> un archivo por día con los precios
   - datos/estaciones.csv                  -> listado de gasolineras (ubicación, marca...)
 
 Uso:
-  python recoger_precios.py                       # precios de hoy
-  python recoger_precios.py --forzar              # repite la descarga aunque ya exista el archivo de hoy
-  python recoger_precios.py --fecha 01-11-2026    # (experimental) precios de un día pasado
-  python recoger_precios.py --archivo datos.json  # procesa un JSON guardado (para pruebas)
+  python recoger_precios.py                           # precios de ayer
+  python recoger_precios.py --fecha 2024-01-01        # un día concreto
+  python recoger_precios.py --desde 2022-01-01        # desde esa fecha hasta ayer
+  python recoger_precios.py --desde 2022-01-01 --hasta 2022-12-31
+  python recoger_precios.py --archivo datos.json      # procesa un JSON guardado (para pruebas)
+  Añade --forzar para volver a descargar días que ya existen.
 """
 
 import argparse
 import json
 import re
+import subprocess
 import time
 import unicodedata
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-import requests
 
-URL_BASE = "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/PreciosCarburantes"
-URL_HOY = f"{URL_BASE}/EstacionesTerrestres/"
-URL_HISTORICO = f"{URL_BASE}/EstacionesTerrestresHist/{{fecha}}"  # fecha en formato DD-MM-AAAA
-
-# Sin estas cabeceras el servidor responde en XML o puede rechazar la petición.
-CABECERAS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-}
+# Precios de toda España en un día concreto (la fecha va en formato DD-MM-AAAA).
+URL_HISTORICO = (
+    "https://sedeaplicaciones.minetur.gob.es/ServiciosRESTCarburantes/"
+    "PreciosCarburantes/EstacionesTerrestresHist/{fecha}"
+)
 
 CARPETA_DATOS = Path(__file__).parent / "datos"
 ZONA_HORARIA = ZoneInfo("Europe/Madrid")
 
 # En España hay unas 12.000 gasolineras. Si llegan muchas menos, la respuesta está incompleta.
 MINIMO_ESTACIONES = 5000
+
+# Pausa entre días al descargar varios seguidos, para no saturar el servidor del Ministerio.
+PAUSA_ENTRE_DIAS = 2  # segundos
 
 # Datos de cada gasolinera: nombre en la API -> nombre en nuestro CSV.
 COLUMNAS_ESTACIONES = {
@@ -68,22 +69,34 @@ COLUMNAS_ESTACIONES = {
 COLUMNAS_TEXTO = ["cp", "id_municipio", "id_provincia", "id_ccaa"]
 
 
+class ErrorDescarga(Exception):
+    """No se pudieron conseguir los datos de un día."""
+
+
 def descargar(url: str, intentos: int = 3) -> dict:
-    """Pide los datos a la API. Si falla, espera y lo vuelve a intentar."""
+    """Pide los datos a la API con curl. Si falla, espera y lo vuelve a intentar.
+
+    Usamos curl en vez de la librería requests porque el servidor del Ministerio
+    corta a veces las conexiones que vienen de Python, y con curl responde siempre.
+    """
+    orden = ["curl", "--silent", "--show-error", "--fail", "--compressed",
+             "--max-time", "300", "--header", "Accept: application/json", url]
     for intento in range(1, intentos + 1):
-        try:
-            print(f"Descargando {url} (intento {intento}/{intentos})...")
-            respuesta = requests.get(url, headers=CABECERAS, timeout=180)
-            respuesta.raise_for_status()  # error si el servidor no responde "200 OK"
-            datos = respuesta.json()
-            if datos.get("ResultadoConsulta") != "OK":
-                raise ValueError(f"la API respondió: {datos.get('ResultadoConsulta')}")
-            return datos
-        except (requests.RequestException, ValueError) as error:
-            print(f"  Falló: {error}")
-            if intento < intentos:
-                time.sleep(30 * intento)  # espera 30 s, luego 60 s...
-    raise SystemExit("No se pudieron descargar los datos. Se reintentará en la próxima ejecución.")
+        resultado = subprocess.run(orden, capture_output=True)
+        if resultado.returncode == 0:
+            try:
+                datos = json.loads(resultado.stdout)
+                if datos.get("ResultadoConsulta") == "OK":
+                    return datos
+                error = f"la API respondió: {datos.get('ResultadoConsulta')}"
+            except json.JSONDecodeError as e:
+                error = f"la respuesta no es un JSON válido ({e})"
+        else:
+            error = resultado.stderr.decode(errors="replace").strip()
+        print(f"  Intento {intento}/{intentos} fallido: {error}")
+        if intento < intentos:
+            time.sleep(30 * intento)  # espera 30 s, luego 60 s...
+    raise ErrorDescarga(f"no se pudo descargar {url}")
 
 
 def a_numero(columna: pd.Series) -> pd.Series:
@@ -100,7 +113,7 @@ def nombre_corto(columna: str) -> str:
 
 
 def fecha_de_la_api(datos: dict) -> date | None:
-    """La API indica la fecha de los precios en el campo 'Fecha', p. ej. '24/11/2026 7:30:15'."""
+    """La API indica la fecha de los precios en el campo 'Fecha', p. ej. '01/01/2024 0:00:00'."""
     try:
         return datetime.strptime(datos["Fecha"], "%d/%m/%Y %H:%M:%S").date()
     except (KeyError, TypeError, ValueError):
@@ -109,6 +122,11 @@ def fecha_de_la_api(datos: dict) -> date | None:
 
 def ruta_del_dia(fecha: date, carpeta: Path) -> Path:
     return carpeta / "precios" / str(fecha.year) / f"{fecha.isoformat()}.csv.gz"
+
+
+def dias_entre(desde: date, hasta: date) -> list[date]:
+    """Todos los días de 'desde' a 'hasta', ambos incluidos."""
+    return [desde + timedelta(days=i) for i in range((hasta - desde).days + 1)]
 
 
 def guardar_precios(estaciones_api: pd.DataFrame, fecha: date, carpeta: Path) -> tuple[Path, int]:
@@ -139,6 +157,8 @@ def actualizar_estaciones(estaciones_api: pd.DataFrame, fecha: date, carpeta: Pa
     en que aparecieron. Así se puede saber cuáles abren, cierran o cambian de marca."""
     disponibles = [c for c in COLUMNAS_ESTACIONES if c in estaciones_api.columns]
     nuevas = estaciones_api[disponibles].rename(columns=COLUMNAS_ESTACIONES)
+    for columna in nuevas.columns:
+        nuevas[columna] = nuevas[columna].astype(str).str.strip()  # quita espacios sobrantes
     nuevas["id_estacion"] = pd.to_numeric(nuevas["id_estacion"])
     for columna in ("latitud", "longitud"):
         if columna in nuevas:
@@ -166,47 +186,70 @@ def actualizar_estaciones(estaciones_api: pd.DataFrame, fecha: date, carpeta: Pa
     return len(todas)
 
 
-def procesar(datos: dict, fecha: date, carpeta: Path = CARPETA_DATOS) -> tuple[Path, int, int]:
+def procesar(datos: dict, fecha: date, carpeta: Path) -> tuple[Path, int, int]:
     estaciones_api = pd.DataFrame(datos["ListaEESSPrecio"])
     ruta, filas = guardar_precios(estaciones_api, fecha, carpeta)
     total_estaciones = actualizar_estaciones(estaciones_api, fecha, carpeta)
     return ruta, filas, total_estaciones
 
 
+def recoger_dia(fecha: date, forzar: bool = False) -> bool:
+    """Descarga y guarda un día. Devuelve True si hay datos de ese día (nuevos o ya existentes)."""
+    if ruta_del_dia(fecha, CARPETA_DATOS).exists() and not forzar:
+        print(f"{fecha}: ya descargado.")
+        return True
+    try:
+        datos = descargar(URL_HISTORICO.format(fecha=fecha.strftime("%d-%m-%Y")))
+        recibidas = len(datos.get("ListaEESSPrecio", []))
+        if recibidas < MINIMO_ESTACIONES:
+            raise ErrorDescarga(f"solo llegaron {recibidas} gasolineras, la respuesta parece incompleta")
+    except ErrorDescarga as error:
+        print(f"{fecha}: ERROR, {error}")
+        return False
+    _, filas, total = procesar(datos, fecha, CARPETA_DATOS)
+    print(f"{fecha}: guardados los precios de {filas} gasolineras ({total} en el listado).")
+    return True
+
+
+def leer_fecha(texto: str) -> date:
+    return datetime.strptime(texto, "%Y-%m-%d").date()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Descarga los precios de las gasolineras de España.")
-    parser.add_argument("--fecha", help="(experimental) día pasado en formato DD-MM-AAAA")
+    parser.add_argument("--fecha", type=leer_fecha, help="un día concreto (AAAA-MM-DD)")
+    parser.add_argument("--desde", type=leer_fecha, help="primer día de un rango (AAAA-MM-DD)")
+    parser.add_argument("--hasta", type=leer_fecha, help="último día del rango (por defecto, ayer)")
     parser.add_argument("--archivo", help="procesar un JSON guardado en vez de descargarlo")
-    parser.add_argument("--forzar", action="store_true", help="descargar aunque ya exista el archivo")
+    parser.add_argument("--forzar", action="store_true", help="descargar aunque el día ya exista")
     args = parser.parse_args()
 
     if args.archivo:
         datos = json.loads(Path(args.archivo).read_text(encoding="utf-8"))
         fecha = fecha_de_la_api(datos) or datetime.now(ZONA_HORARIA).date()
+        ruta, filas, total = procesar(datos, fecha, CARPETA_DATOS)
+        print(f"Guardados los precios de {filas} gasolineras en {ruta} ({total} en el listado).")
+        return
+
+    ayer = datetime.now(ZONA_HORARIA).date() - timedelta(days=1)
+    if args.desde:
+        dias = dias_entre(args.desde, min(args.hasta or ayer, ayer))
     else:
-        if args.fecha:
-            fecha = datetime.strptime(args.fecha, "%d-%m-%Y").date()
-            url = URL_HISTORICO.format(fecha=args.fecha)
-        else:
-            fecha = datetime.now(ZONA_HORARIA).date()
-            url = URL_HOY
+        dias = [args.fecha or ayer]
 
-        # Si ya tenemos los precios de ese día, no hace falta repetir.
-        if ruta_del_dia(fecha, CARPETA_DATOS).exists() and not args.forzar:
-            print(f"Ya existen los precios del {fecha}. Nada que hacer.")
-            return
+    fallidos = []
+    for numero, dia in enumerate(dias, start=1):
+        descargado_ya = ruta_del_dia(dia, CARPETA_DATOS).exists() and not args.forzar
+        if not recoger_dia(dia, args.forzar):
+            fallidos.append(dia)
+        if numero < len(dias) and not descargado_ya:
+            time.sleep(PAUSA_ENTRE_DIAS)
 
-        datos = descargar(url)
-        if not args.fecha:
-            fecha = fecha_de_la_api(datos) or fecha
-
-        recibidas = len(datos.get("ListaEESSPrecio", []))
-        if recibidas < MINIMO_ESTACIONES:
-            raise SystemExit(f"Solo llegaron {recibidas} gasolineras: la respuesta parece incompleta.")
-
-    ruta, filas, total_estaciones = procesar(datos, fecha)
-    print(f"Guardados los precios de {filas} gasolineras en {ruta}")
-    print(f"Listado de gasolineras actualizado: {total_estaciones} en total")
+    if fallidos:
+        lista = ", ".join(str(d) for d in fallidos)
+        raise SystemExit(f"{len(fallidos)} de {len(dias)} días fallaron: {lista}. "
+                         "Se reintentarán en la próxima ejecución.")
+    print(f"Listo: {len(dias)} día(s) procesado(s).")
 
 
 if __name__ == "__main__":

@@ -1,20 +1,30 @@
 # Precios de la gasolina en España
 
-Recogida automática y diaria de los precios de **todas las gasolineras de España**, para analizar
-después si los precios **suben rápido cuando sube el petróleo y bajan despacio cuando baja**
-(el llamado efecto "cohetes y plumas").
+Recogida automática de los precios diarios de **todas las gasolineras de España** desde 2022,
+para analizar después si los precios **suben rápido cuando sube el petróleo y bajan despacio
+cuando baja** (el llamado efecto "cohetes y plumas").
 
-> Estado: fase 1, recogida de datos. El análisis llegará cuando haya varios meses de histórico.
+> Estado: fase 1, recogida de datos. El análisis vendrá después.
 
 ## Cómo funciona
 
-1. Cada mañana, GitHub Actions ejecuta `recoger_precios.py` de forma automática.
-2. El script descarga los precios de la API pública del Ministerio para la Transición Ecológica.
-3. Guarda los precios del día y actualiza el listado de gasolineras en la carpeta `datos/`.
-4. GitHub guarda esos archivos en el repositorio, así que el histórico crece solo cada día.
+- **Cada mañana**, GitHub Actions ejecuta `recoger_precios.py`, que descarga los precios del día
+  anterior y revisa la última semana por si algún día falló.
+- **El histórico** (desde enero de 2022) se rellena con el proceso `Rellenar histórico de precios`,
+  que se puede volver a lanzar desde la pestaña Actions para añadir años anteriores.
+- Todo sale del **servicio histórico de la API del Ministerio**, que da los precios de cualquier día.
+  Usar siempre la misma fuente evita mezclar datos tomados de formas distintas.
+- Los archivos se guardan en la carpeta `datos/` del propio repositorio.
 
-Si la descarga de la mañana falla, hay un segundo intento por la tarde. Si el archivo del día ya
-existe, el script no hace nada.
+### Decisiones técnicas
+
+- **Descarga con `curl`, no con `requests`.** Al probarlo en GitHub, el servidor del Ministerio
+  cortaba a veces las conexiones de Python durante el inicio de la conexión segura (TLS),
+  mientras que `curl` respondía siempre. Python se encarga del procesado.
+- **Control de calidad:** si llegan menos de 5.000 gasolineras (hay unas 12.000), el día se
+  descarta y se reintenta en la siguiente ejecución.
+- **Archivos comprimidos y deterministas:** cada día ocupa poco, y si se vuelve a descargar con
+  los mismos datos el archivo es idéntico, así que no genera cambios innecesarios.
 
 ## Datos que genera
 
@@ -24,7 +34,7 @@ existe, el script no hace nada.
 |---|---|
 | `fecha` | Día de los precios |
 | `id_estacion` | Identificador de la gasolinera (une con `estaciones.csv`) |
-| `gasolina_95_e5`, `gasoleo_a`, ... | Precio en €/litro de cada combustible (vacío si no lo vende) |
+| `gasolina_95_e5`, `gasoleo_a`, ... | Precio en € de cada combustible (vacío si no lo vende) |
 
 **`datos/estaciones.csv`**: una fila por gasolinera.
 
@@ -49,10 +59,13 @@ datos = precios.merge(estaciones, on="id_estacion")
 
 ## Ejecutarlo en tu ordenador
 
+Necesitas Python 3.10 o superior y `curl` (viene instalado en Mac y Linux).
+
 ```bash
 pip install -r requirements.txt
-python recoger_precios.py                      # precios de hoy
-python recoger_precios.py --fecha 01-11-2026   # (experimental) un día pasado
+python recoger_precios.py                       # precios de ayer
+python recoger_precios.py --fecha 2024-01-01    # un día concreto
+python recoger_precios.py --desde 2024-01-01 --hasta 2024-01-31
 ```
 
 Pruebas automáticas con datos de ejemplo (no necesitan internet):

@@ -4,19 +4,18 @@ on:
   schedule:
     # GitHub usa la hora UTC. 06:17 UTC = 07:17 en Madrid (08:17 en horario de verano).
     - cron: "17 6 * * *"
-    # Segundo intento por la tarde, por si el de la mañana falló (si ya hay datos, no hace nada).
+    # Segundo intento por la tarde, por si el de la mañana falló (los días ya guardados se saltan).
     - cron: "47 15 * * *"
   # Se ejecuta también cuando cambia el código, para probarlo al momento.
   push:
     paths:
       - "recoger_precios.py"
-      - "requirements.txt"
       - ".github/workflows/recoger_precios.yml"
   # Permite lanzarlo a mano desde la pestaña "Actions" de GitHub.
   workflow_dispatch:
     inputs:
       fecha:
-        description: "(Experimental) Día pasado en formato DD-MM-AAAA. Déjalo vacío para hoy."
+        description: "Día concreto (AAAA-MM-DD). Vacío = los últimos 7 días."
         required: false
         default: ""
 
@@ -30,7 +29,7 @@ concurrency:
 jobs:
   recoger:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - name: Descargar el repositorio
         uses: actions/checkout@v5
@@ -51,18 +50,20 @@ jobs:
           if [ -n "$FECHA" ]; then
             python recoger_precios.py --fecha "$FECHA"
           else
-            python recoger_precios.py
+            # Revisa la última semana: así, si algún día falló, se recupera solo.
+            python recoger_precios.py --desde "$(TZ=Europe/Madrid date -d '7 days ago' +%F)"
           fi
 
       - name: Guardar los datos en el repositorio
+        if: always() # guarda lo que se haya descargado aunque algún día haya fallado
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add datos
+          git add datos 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No hay datos nuevos que guardar."
           else
-            git commit -m "Precios del $(TZ=Europe/Madrid date +%F)"
+            git commit -m "Precios actualizados el $(TZ=Europe/Madrid date +%F)"
             git pull --rebase
             git push
           fi

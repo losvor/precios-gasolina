@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pandas as pd
 
-from recoger_precios import fecha_de_la_api, nombre_corto, procesar
+import recoger_precios
+from recoger_precios import dias_entre, fecha_de_la_api, nombre_corto, procesar
 
 EJEMPLO = json.loads((Path(__file__).parent / "ejemplo_api.json").read_text(encoding="utf-8"))
 
@@ -52,3 +53,35 @@ def test_estaciones_conservan_ceros_y_fechas(tmp_path):
     assert estaciones.loc[11500, "rotulo"] == "GALP"  # datos más recientes
     assert estaciones.loc[11500, "vista_por_primera_vez"] == "2026-11-24"
     assert estaciones.loc[11500, "vista_por_ultima_vez"] == "2026-11-25"
+
+
+def test_dias_entre():
+    dias = dias_entre(date(2024, 2, 27), date(2024, 3, 1))
+    assert dias == [date(2024, 2, 27), date(2024, 2, 28), date(2024, 2, 29), date(2024, 3, 1)]
+
+
+def test_recoger_dia_descarga_y_luego_salta(tmp_path, monkeypatch):
+    urls = []
+
+    def descarga_falsa(url, intentos=3):
+        urls.append(url)
+        return EJEMPLO
+
+    monkeypatch.setattr(recoger_precios, "descargar", descarga_falsa)
+    monkeypatch.setattr(recoger_precios, "CARPETA_DATOS", tmp_path)
+    monkeypatch.setattr(recoger_precios, "MINIMO_ESTACIONES", 1)
+
+    assert recoger_precios.recoger_dia(date(2024, 1, 1))
+    assert urls[0].endswith("/EstacionesTerrestresHist/01-01-2024")  # formato de fecha de la API
+    assert (tmp_path / "precios" / "2024" / "2024-01-01.csv.gz").exists()
+
+    assert recoger_precios.recoger_dia(date(2024, 1, 1))  # ya existe: no vuelve a descargar
+    assert len(urls) == 1
+
+
+def test_recoger_dia_rechaza_respuestas_incompletas(tmp_path, monkeypatch):
+    monkeypatch.setattr(recoger_precios, "descargar", lambda url, intentos=3: EJEMPLO)
+    monkeypatch.setattr(recoger_precios, "CARPETA_DATOS", tmp_path)
+
+    assert not recoger_precios.recoger_dia(date(2024, 1, 1))  # 3 gasolineras < mínimo
+    assert not (tmp_path / "precios").exists()
